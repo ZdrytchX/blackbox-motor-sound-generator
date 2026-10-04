@@ -2,8 +2,8 @@
  Step 1: Betaflight Blackbox Explorer / Configurator: Select your log and export as CSV    
  Step 2: Dump them in the same folder as this file. Right click "Raw" and "Save As" to download to your pc. You can edit .py files with notepad    
  Step 3: Install python 3 if you haven't done so yet    
- Step 4: pip install scipy etc. as needed    
- Step 5: python.exe [thisfile].py or py [thisfile].py    
+ Step 4: `pip install scipy` etc. as needed in cmd prompt, shell, terminal illness or whatevers you got    
+ Step 5: `python.exe thisfile.py` or `py thisfile.py`    
  Step 6: Profit?!?    
  Step 7: If it sounds bad, adjust OVERTONE_WEIGHTS and run this file again   
  
