@@ -33,18 +33,43 @@ from scipy.integrate import cumulative_trapezoid
 
 # --- Configuration & Audio Settings ---
 SAMPLE_RATE = 44100         # Standard 44.1 kHz audio rate
-POLES = 12                  # 12-pole motor (12P / 6 pole pairs)
-ATTENUATION = 0.5           # Master volume scaling
-ERPM_SCALE_FACTOR = 52.0    # Multiplier applied to base eRPM signal
+POLES = 14                  # Count magnets on the motors
+ATTENUATION = 0.75          # Master volume scaling
+ERPM_SCALE_FACTOR = 1       # Multiplier applied to base eRPM signal
+MIN_MOTOR_VOLUME = 0.5      # Minimum motor volume
 NOISE_HZ = 220              # additional averaged noise
 
+# --- Reverb Settings ---
+REVERB_ENABLED = True
+REVERB_DRY = 0.5           # Level of original dry signal
+REVERB_WET = 0.5           # Level of reverb signal
+REVERB_DELAYS = [0.029, 0.037, 0.053, 0.071, 0.097, 0.113]
+REVERB_DECAYS = [0.075, 0.0333, 0.0125, 0.0067, 0.008, 0.004]
+
 # Motor & Propeller Sine Harmonics
+# TODO if I can be bothered wasting money on a dedicated mounted rig: A more thorough single-motor spectrum analysis
 OVERTONE_WEIGHTS = {
-    3: 0.375,   # BPF Base / 3-blade prop harmonic
-    6: 0.25,    # 2nd BPF Harmonic
-    9: 0.1875,  # 3rd BPF Harmonic
-    12: 0.125,  # 12-pole switching harmonic
-    36: 0.0625  # ESC switching frequency harmonic
+    1.25:       0.09375,        # minor harmonic
+    1.3333:     0.046875,       # minor harmonic
+    1.5:        0.09375,        # minor harmonic
+    1.55:       0.015625,       # minor harmonic
+    1.6666:     0.09375,        # minor harmonic
+    1.75:       0.03125,        # minor harmonic
+    2:          0.125,          # major harmonic
+    2.25:       0.0625,         # minor harmonic
+    2.5:        0.046875,       # minor harmonic
+    3:          0.1875,         # BPF Base / 3-blade prop harmonic
+    3.5:        0.015625,       # minor harmonic
+    4:          0.046875,       # minor harmonic
+    5:          0.0234375,      # minor harmonic
+    6:          0.0625,         # 2nd BPF Harmonic
+    7:          0.0234375,      # minor Harmonic
+    8:          0.015625,       # minor Harmonic
+    9:          0.03125,        # 3rd BPF Harmonic
+    10:         0.01171875,     # minor Harmonic
+    POLES:      0.03125,        # 12-pole switching harmonic
+    POLES * 2:  0.015625,       # ESC switching frequency harmonic
+    POLES * 3:  0.015625        # ESC switching frequency harmonic
 }
 
 def parse_csv_or_text_log(file_path):
@@ -127,6 +152,37 @@ def generate_additional_noise(audio_time, avg_throttle, gyro_total):
     
     return raw_sine * sine_vol
 
+def apply_reverb(stereo_signal, sample_rate):
+    """
+    Applies a simple multi-tap delay line reverb effect to a stereo signal.
+    """
+    if not REVERB_ENABLED:
+        return stereo_signal
+
+    num_samples = len(stereo_signal)
+    reverb_accum = np.zeros_like(stereo_signal)
+
+    for i, (delay_sec, decay) in enumerate(zip(REVERB_DELAYS, REVERB_DECAYS)):
+        delay_samples = int(delay_sec * sample_rate)
+        if delay_samples >= num_samples:
+            continue
+        
+        # Create delayed buffer shifted by delay_samples
+        delayed_signal = np.zeros_like(stereo_signal)
+        
+        # Swap channels slightly on alternating taps for spatial width
+        if i % 2 == 1:
+            delayed_signal[delay_samples:, 0] = stereo_signal[:-delay_samples, 1] * decay
+            delayed_signal[delay_samples:, 1] = stereo_signal[:-delay_samples, 0] * decay
+        else:
+            delayed_signal[delay_samples:] = stereo_signal[:-delay_samples] * decay
+
+        reverb_accum += delayed_signal
+
+    # Combine Dry and Wet signals
+    processed_signal = (stereo_signal * REVERB_DRY) + (reverb_accum * REVERB_WET)
+    return processed_signal
+
 def process_log_to_audio(log_data, output_filename):
     headers = log_data['headers']
     data = log_data['data']
@@ -173,6 +229,7 @@ def process_log_to_audio(log_data, output_filename):
     motor_freqs = []
     motor_volumes = []
     throttles = []
+    MIN_MOTOR_VOL_DIFFERENCE = 1 - MIN_MOTOR_VOLUME
 
     # eRPM = DSHOT telemetry reported motor RPM (not accurate at the top end of power curve)
     # motor = PID sum output to motors, always comes before eRPM so we use this for motor strain intensity and thus volume
@@ -181,13 +238,13 @@ def process_log_to_audio(log_data, output_filename):
         throttle = np.clip((motor_raw - 1000.0) / 1000.0, 0.0, 1.0)
         throttles.append(throttle)
         
-        volume_env = np.clip(0.0625 + 0.9375 * throttle, 0.0625, 1.0)
+        volume_env = np.clip(MIN_MOTOR_VOLUME + MIN_MOTOR_VOL_DIFFERENCE * throttle, MIN_MOTOR_VOLUME, 1.0)
         motor_volumes.append(volume_env)
 
         # Base eRPM values multiplied by scale factor
         erpm = resample_signal(f'eRPM[{i}]', default_val=0.0) * ERPM_SCALE_FACTOR
         if np.max(erpm) > 0:
-            mech_hz = (erpm / (POLES / 2.0)) / 60.0
+            mech_hz = (erpm * 100 / (60 * POLES / 2.0))
         else:
             mech_hz = 30.0 + (throttle ** 1.5) * 1170.0
 
@@ -227,6 +284,9 @@ def process_log_to_audio(log_data, output_filename):
     right_channel = (1.0 - left_bleed) * right_base + right_bleed * left_base + sine_flutter
 
     stereo_signal = np.vstack((left_channel, right_channel)).T
+
+    # Apply Reverb
+    stereo_signal = apply_reverb(stereo_signal, SAMPLE_RATE)
 
     # Peak Normalization
     max_val = np.max(np.abs(stereo_signal))
