@@ -10,6 +10,22 @@
  Please note that eRPM reported values isn't the real RPM, there's some scalar involved   
  
  No warranty provided for you bricking your own system out of your own stupidity whatever blah blah   
+
+ ___
+
+ ## Blackbox Requirements:
+
+ - Motor (used for motor strain)
+ - RPM (used motor RPM, duh)
+ - Gyro (used for stereo/FM/AM modulation effects)
+ - Raw Gyro (used for noise)
+ - RC Setpoint (used for some stupid noise generation effect but its kinda shitty so I might remove it in the future)
+
+Note: Higher frequency blackbox logging rate will give more accurate sounding motors but you can't record as long. Make sure you clear your blackbox log before flying (to access menu: left stick left, right stick up, and then navigate to features -> blackbox -> scroll down and clear blackbox log)
+
+Don't forget you can use the blackbox logs to overlay HUDs like stick positions and do gyroflow shenanigans!
+
+ ___
  
    DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE    
    Version 2, December 2004    
