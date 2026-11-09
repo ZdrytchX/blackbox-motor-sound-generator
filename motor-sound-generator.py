@@ -30,46 +30,47 @@ import os
 import numpy as np
 from scipy.io import wavfile
 from scipy.integrate import cumulative_trapezoid
+from scipy.signal import butter, lfilter
 
 # --- Configuration & Audio Settings ---
 SAMPLE_RATE = 44100         # Standard 44.1 kHz audio rate
 POLES = 14                  # Count magnets on the motors
 ATTENUATION = 0.75          # Master volume scaling
 ERPM_SCALE_FACTOR = 1       # Multiplier applied to base eRPM signal
-MIN_MOTOR_VOLUME = 0.5      # Minimum motor volume
+MIN_MOTOR_VOLUME = 0.5      # Motor volume scales from this to 1.0 at max throttle
 NOISE_HZ = 220              # additional averaged noise
 
-# --- Reverb Settings ---
+# --- Equalizer Settings (Adjust gains in dB) ---
+EQ_ENABLED = True
+EQ_LOW_GAIN_DB = 0.0
+EQ_LOW_GAIN_FC = 200.0
+EQ_MID_GAIN_DB = -1
+EQ_MID_GAIN_FC = 600.0
+EQ_HIGH_GAIN_DB = -7.5
+EQ_HIGH_GAIN_FC = 1800.0
+
+# TODO --- Reverb Settings ---
 REVERB_ENABLED = True
 REVERB_DRY = 0.5           # Level of original dry signal
 REVERB_WET = 0.5           # Level of reverb signal
 REVERB_DELAYS = [0.029, 0.037, 0.053, 0.071, 0.097, 0.113]
 REVERB_DECAYS = [0.075, 0.0333, 0.0125, 0.0067, 0.008, 0.004]
 
-# Motor & Propeller Sine Harmonics
-# TODO if I can be bothered wasting money on a dedicated mounted rig: A more thorough single-motor spectrum analysis
+# Harmonics taken from gopro video, convert spectrum db to absolute values with https://www.daycounter.com/Calculators/Decibels-Calculator.html
+# pole weights are just whatever ill do that later lol
 OVERTONE_WEIGHTS = {
-    1.25:       0.09375,        # minor harmonic
-    1.3333:     0.046875,       # minor harmonic
-    1.5:        0.09375,        # minor harmonic
-    1.55:       0.015625,       # minor harmonic
-    1.6666:     0.09375,        # minor harmonic
-    1.75:       0.03125,        # minor harmonic
-    2:          0.125,          # major harmonic
-    2.25:       0.0625,         # minor harmonic
-    2.5:        0.046875,       # minor harmonic
-    3:          0.1875,         # BPF Base / 3-blade prop harmonic
-    3.5:        0.015625,       # minor harmonic
-    4:          0.046875,       # minor harmonic
-    5:          0.0234375,      # minor harmonic
-    6:          0.0625,         # 2nd BPF Harmonic
-    7:          0.0234375,      # minor Harmonic
-    8:          0.015625,       # minor Harmonic
-    9:          0.03125,        # 3rd BPF Harmonic
-    10:         0.01171875,     # minor Harmonic
-    POLES:      0.03125,        # 12-pole switching harmonic
-    POLES * 2:  0.015625,       # ESC switching frequency harmonic
-    POLES * 3:  0.015625        # ESC switching frequency harmonic
+    2:              0.0895,
+    3:              0.0357,
+    4:              0.0113,
+    5:              0.0035715,
+    6:              0.0071174377,
+    7:              0.001593625498,
+    8:              0.0005,
+    9:              0.0022472,
+    10:             8.948545861298e-4,
+    POLES:          3e-5,
+    POLES * 1:      1e-5,
+    POLES * 1:      1e-5,
 }
 
 def parse_csv_or_text_log(file_path):
@@ -143,14 +144,98 @@ def generate_additional_noise(audio_time, avg_throttle, gyro_total):
     """
     # Sine Pitch Sweep
     additional_noise = (avg_throttle ** 1.2) * NOISE_HZ
-    
     raw_sine = generate_tone(audio_time, additional_noise)
-    
+
     # Scale sine volume dynamically with throttle & gyro intensity
     sine_vol = (avg_throttle ** 2) * 0.03125 + (gyro_total * 0.000002)
     sine_vol = np.clip(sine_vol, 0.0, 0.0625)
     
     return raw_sine * sine_vol
+
+def apply_biquad_filter(data, b, a):
+    """
+    Applies a biquad filter along both channels of a stereo signal independently.
+    """
+    if data.ndim == 2:
+        filtered = np.empty_like(data)
+        filtered[:, 0] = lfilter(b, a, data[:, 0])
+        filtered[:, 1] = lfilter(b, a, data[:, 1])
+        return filtered
+    else:
+        return lfilter(b, a, data)
+
+def apply_equalizer(stereo_signal, sample_rate):
+    """
+    Applies a 3-band EQ (Low shelf, Mid peaking, High shelf) based on configured gain values in dB.
+    """
+    if not EQ_ENABLED:
+        return stereo_signal
+
+    processed = stereo_signal.copy()
+
+    # 1. Low Shelf Filter (< 200 Hz)
+    if EQ_LOW_GAIN_DB != 0.0:
+        fc = EQ_LOW_GAIN_FC
+        w0 = 2.0 * np.pi * fc / sample_rate
+        A = 10.0 ** (EQ_LOW_GAIN_DB / 40.0)
+        alpha = np.sin(w0) / 2.0 * np.sqrt((A + 1.0/A)*(1.0/1.0 - 1.0) + 2.0)
+        
+        cos_w0 = np.cos(w0)
+        sin_w0 = np.sin(w0)
+        
+        b0 = A * ((A + 1.0) - (A - 1.0) * cos_w0 + 2.0 * np.sqrt(A) * alpha)
+        b1 = 2.0 * A * ((A - 1.0) - (A + 1.0) * cos_w0)
+        b2 = A * ((A + 1.0) - (A - 1.0) * cos_w0 - 2.0 * np.sqrt(A) * alpha)
+        a0 = (A + 1.0) + (A - 1.0) * cos_w0 + 2.0 * np.sqrt(A) * alpha
+        a1 = -2.0 * ((A - 1.0) + (A + 1.0) * cos_w0)
+        a2 = (A + 1.0) + (A - 1.0) * cos_w0 - 2.0 * np.sqrt(A) * alpha
+
+        b = np.array([b0/a0, b1/a0, b2/a0])
+        a = np.array([1.0, a1/a0, a2/a0])
+        processed = apply_biquad_filter(processed, b, a)
+
+    # 2. Mid Peaking Filter (~1000 Hz)
+    if EQ_MID_GAIN_DB != 0.0:
+        fc = EQ_MID_GAIN_FC
+        Q = 1.0
+        w0 = 2.0 * np.pi * fc / sample_rate
+        A = 10.0 ** (EQ_MID_GAIN_DB / 40.0)
+        alpha = np.sin(w0) / (2.0 * Q)
+        
+        cos_w0 = np.cos(w0)
+        
+        b0 = 1.0 + alpha * A
+        b1 = -2.0 * cos_w0
+        b2 = 1.0 - alpha * A
+        a0 = 1.0 + alpha / A
+        a1 = -2.0 * cos_w0
+        a2 = 1.0 - alpha / A
+
+        b = np.array([b0/a0, b1/a0, b2/a0])
+        a = np.array([1.0, a1/a0, a2/a0])
+        processed = apply_biquad_filter(processed, b, a)
+
+    # 3. High Shelf Filter (> 5000 Hz)
+    if EQ_HIGH_GAIN_DB != 0.0:
+        fc = EQ_HIGH_GAIN_FC
+        w0 = 2.0 * np.pi * fc / sample_rate
+        A = 10.0 ** (EQ_HIGH_GAIN_DB / 40.0)
+        alpha = np.sin(w0) / 2.0 * np.sqrt((A + 1.0/A)*(1.0/1.0 - 1.0) + 2.0)
+        
+        cos_w0 = np.cos(w0)
+        
+        b0 = A * ((A + 1.0) + (A - 1.0) * cos_w0 + 2.0 * np.sqrt(A) * alpha)
+        b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cos_w0)
+        b2 = A * ((A + 1.0) + (A - 1.0) * cos_w0 - 2.0 * np.sqrt(A) * alpha)
+        a0 = (A + 1.0) - (A - 1.0) * cos_w0 + 2.0 * np.sqrt(A) * alpha
+        a1 = 2.0 * ((A - 1.0) - (A + 1.0) * cos_w0)
+        a2 = (A + 1.0) - (A - 1.0) * cos_w0 - 2.0 * np.sqrt(A) * alpha
+
+        b = np.array([b0/a0, b1/a0, b2/a0])
+        a = np.array([1.0, a1/a0, a2/a0])
+        processed = apply_biquad_filter(processed, b, a)
+
+    return processed
 
 def apply_reverb(stereo_signal, sample_rate):
     """
@@ -166,10 +251,10 @@ def apply_reverb(stereo_signal, sample_rate):
         delay_samples = int(delay_sec * sample_rate)
         if delay_samples >= num_samples:
             continue
-        
+
         # Create delayed buffer shifted by delay_samples
         delayed_signal = np.zeros_like(stereo_signal)
-        
+
         # Swap channels slightly on alternating taps for spatial width
         if i % 2 == 1:
             delayed_signal[delay_samples:, 0] = stereo_signal[:-delay_samples, 1] * decay
@@ -249,14 +334,18 @@ def process_log_to_audio(log_data, output_filename):
             mech_hz = 30.0 + (throttle ** 1.5) * 1170.0
 
         # Differential gyro pitch shifts across quad quadrants (X = Pitch, Y = Roll)
-        if i in [2, 3]:  # Motors 3, 4 (Front)
+        # Motors 3, 4 (Front)
+        if i in [2, 3]:
             mech_hz *= gyro_x_factor
-        else:            # Motors 1, 2 (Rear)
+        # Motors 1, 2 (Rear)
+        else:
             mech_hz /= gyro_x_factor
 
-        if i in [1, 2]:  # Motors 2, 3 (Left)
+        # Motors 2, 3 (Left)
+        if i in [1, 2]:
             mech_hz *= gyro_y_factor
-        else:            # Motors 1, 4 (Right)
+        # Motors 1, 4 (Right)
+        else:
             mech_hz /= gyro_y_factor
 
         motor_freqs.append(mech_hz)
@@ -285,15 +374,16 @@ def process_log_to_audio(log_data, output_filename):
 
     stereo_signal = np.vstack((left_channel, right_channel)).T
 
+    # Apply Equalizer
+    stereo_signal = apply_equalizer(stereo_signal, SAMPLE_RATE)
+
     # Apply Reverb
     stereo_signal = apply_reverb(stereo_signal, SAMPLE_RATE)
 
-    # Peak Normalization
     max_val = np.max(np.abs(stereo_signal))
     if max_val > 0:
         stereo_signal = stereo_signal / max_val
 
-    # 20ms fade-in/fade-out
     fade_samples = min(int(SAMPLE_RATE * 0.02), num_audio_samples // 2)
     if fade_samples > 0:
         fade_in = np.linspace(0.0, 1.0, fade_samples)[:, np.newaxis]
