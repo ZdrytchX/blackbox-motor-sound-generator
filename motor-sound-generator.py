@@ -35,6 +35,7 @@ from scipy.signal import butter, lfilter
 # --- Configuration & Audio Settings ---
 SAMPLE_RATE = 44100         # Standard 44.1 kHz audio rate
 POLES = 14                  # Count magnets on the motors
+STATORS = 12                # Count stators on the motors
 ATTENUATION = 0.75          # Master volume scaling
 ERPM_SCALE_FACTOR = 1       # Multiplier applied to base eRPM signal
 MIN_MOTOR_VOLUME = 0.5      # Motor volume scales from this to 1.0 at max throttle
@@ -69,8 +70,9 @@ OVERTONE_WEIGHTS = {
     9:              0.0022472,
     10:             8.948545861298e-4,
     POLES:          3e-5,
-    POLES * 1:      1e-5,
-    POLES * 1:      1e-5,
+    POLES * 2:      1e-5,
+    POLES * 3:      1e-5,
+    POLES * STATORS: 1e-6
 }
 
 def parse_csv_or_text_log(file_path):
